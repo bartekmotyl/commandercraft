@@ -51,3 +51,7 @@ Mouse: click = cursor, Ctrl-click / right-click = mark, Shift-click = mark range
 
 Drag and drop, OS context menus, writing into archives, file watching (panels refresh on window
 focus and after operations), quick search, multi-rename, viewer, plugins.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
