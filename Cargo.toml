@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.90"
+
+[workspace.dependencies]
+commandercraft-core = { path = "crates/core" }
+commandercraft-ui-egui = { path = "crates/ui-egui" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# archives (read-only)
+zip = { version = "2.4", default-features = false, features = ["deflate", "deflate64", "bzip2", "time"] }
+tar = "0.4"
+flate2 = "1"
+bzip2 = "0.6"
+liblzma = { version = "0.4", features = ["static"] }
+
+# OS
+open = "5"
+trash = "5"
+
+# ui
+egui = "0.36"
+egui_extras = "0.36"
+eframe = { version = "0.36", default-features = false }
+
+tempfile = "3"
+egui_kittest = "0.36"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
