@@ -54,6 +54,44 @@ pub fn detect(path: &Path) -> Option<Kind> {
     })
 }
 
+/// The archive kind of a file from its first bytes, whatever its name (`.epub`, `.docx`, `.jar`…
+/// are zips). Compressed streams are peeked into to tell `tar.gz` from a single `gz` file.
+pub fn detect_content(path: &Path) -> Option<Kind> {
+    let mut head = [0u8; 512];
+    let n = read_up_to(&mut File::open(path).ok()?, &mut head);
+    let head = &head[..n];
+    let is_tar = |b: &[u8]| b.len() >= 262 && &b[257..262] == b"ustar";
+    let inner_is_tar = |kind: Kind| {
+        let mut buf = [0u8; 512];
+        decoder(path, kind).ok().map(|mut d| read_up_to(&mut d, &mut buf)).is_some_and(|n| is_tar(&buf[..n]))
+    };
+    if head.starts_with(b"PK\x03\x04") || head.starts_with(b"PK\x05\x06") {
+        Some(Kind::Zip)
+    } else if head.starts_with(&[0x1f, 0x8b]) {
+        Some(if inner_is_tar(Kind::Gz) { Kind::TarGz } else { Kind::Gz })
+    } else if head.starts_with(b"BZh") {
+        Some(if inner_is_tar(Kind::Bz2) { Kind::TarBz2 } else { Kind::Bz2 })
+    } else if head.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0x00]) {
+        Some(if inner_is_tar(Kind::Xz) { Kind::TarXz } else { Kind::Xz })
+    } else if is_tar(head) {
+        Some(Kind::Tar)
+    } else {
+        None
+    }
+}
+
+/// Read until `buf` is full or the stream ends; errors end it too.
+fn read_up_to(r: &mut dyn Read, buf: &mut [u8]) -> usize {
+    let mut n = 0;
+    while n < buf.len() {
+        match r.read(&mut buf[n..]) {
+            Ok(0) | Err(_) => break,
+            Ok(k) => n += k,
+        }
+    }
+    n
+}
+
 /// `join("a/b", "c")` → `"a/b/c"`; `join("", "c")` → `"c"`.
 pub fn join(inner: &str, name: &str) -> String {
     if inner.is_empty() { name.to_string() } else { format!("{inner}/{name}") }
@@ -177,7 +215,9 @@ pub fn index(path: &Path) -> io::Result<Arc<Index>> {
     {
         return Ok(idx.clone());
     }
-    let kind = detect(path).ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "not a supported archive"))?;
+    let kind = detect_content(path)
+        .or_else(|| detect(path))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "not a supported archive"))?;
     let idx = Arc::new(read_index(path, kind, meta.modified().ok())?);
     if let Ok(mut cache) = CACHE.lock() {
         if cache.len() >= CACHE_LIMIT {
@@ -546,6 +586,26 @@ mod tests {
         assert_eq!(fs::read_to_string(dir.path().join("main.rs")).unwrap(), "hello from tar");
         let mtime = fs::metadata(dir.path().join("main.rs")).unwrap().modified().unwrap();
         assert_eq!(mtime, SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+    }
+
+    #[test]
+    fn content_detection_ignores_the_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = dir.path().join("book.epub");
+        make_zip(&book);
+        assert_eq!(detect(&book), None);
+        assert_eq!(detect_content(&book), Some(Kind::Zip));
+        assert!(index(&book).unwrap().is_dir("docs/2024"));
+
+        let odd = dir.path().join("backup.data");
+        make_tar_gz(&odd);
+        assert_eq!(detect_content(&odd), Some(Kind::TarGz));
+        assert_eq!(index(&odd).unwrap().list("")[0].name, "src");
+
+        let plain = dir.path().join("notes.txt");
+        fs::write(&plain, b"not an archive").unwrap();
+        assert_eq!(detect_content(&plain), None);
+        assert!(index(&plain).is_err());
     }
 
     #[test]

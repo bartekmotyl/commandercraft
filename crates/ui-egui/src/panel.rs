@@ -205,6 +205,8 @@ pub struct Context<'a> {
     pub row_h: f32,
     pub monospace: bool,
     pub palette: Palette,
+    /// Paint the row under the mouse (off after keyboard navigation, until the mouse moves).
+    pub show_hover: bool,
 }
 
 pub fn show(ui: &mut egui::Ui, panel: &mut Panel, cx: &Context<'_>) -> Vec<Action> {
@@ -404,25 +406,38 @@ fn file_table(ui: &mut egui::Ui, tab: &mut Tab, cx: &Context<'_>, header_h: f32,
                     }
                 };
                 let (stem, ext) = e.stem_ext();
-                row.col(|ui| {
-                    // The row background (hover, marked, cursor), painted across the whole row.
+                // egui's own hover highlight is replaced by ours (hidden while using the keyboard).
+                row.set_hovered(false);
+                // The table paints its stripe per cell, so every cell paints its share of the row
+                // background over it; the cursor outline is drawn by the last cell, over all four.
+                let background = |ui: &egui::Ui| {
                     let cell = ui.max_rect();
-                    let row_rect = egui::Rect::from_x_y_ranges(table_x, cell.y_range());
-                    let clip = egui::Rect::from_x_y_ranges(table_x, ui.clip_rect().y_range());
-                    let painter = egui::Painter::new(ui.ctx().clone(), ui.layer_id(), clip);
-                    if hover_pos.is_some_and(|pos| row_rect.contains(pos)) {
-                        painter.rect_filled(row_rect, 0.0, p.hover);
-                    }
-                    if marked {
-                        painter.rect_filled(row_rect, 0.0, p.marked);
+                    let hovered = cx.show_hover && hover_pos.is_some_and(|pos| table_x.contains(pos.x) && cell.y_range().contains(pos.y));
+                    let fill = if marked {
+                        Some(p.marked)
                     } else if is_cursor && cx.active {
-                        painter.rect_filled(row_rect, 0.0, p.accent_soft);
+                        Some(p.accent_soft)
+                    } else if hovered {
+                        Some(p.hover)
+                    } else {
+                        None
+                    };
+                    if let Some(fill) = fill {
+                        ui.painter().rect_filled(cell, 0.0, fill);
                     }
+                };
+                let outline = |ui: &egui::Ui| {
                     if is_cursor {
+                        let row_rect = egui::Rect::from_x_y_ranges(table_x, ui.max_rect().y_range());
+                        let clip = egui::Rect::from_x_y_ranges(table_x, ui.clip_rect().y_range());
+                        let painter = egui::Painter::new(ui.ctx().clone(), ui.layer_id(), clip);
                         let w = if cx.active { 1.5 } else { 1.0 };
                         let color = if cx.active { p.accent } else { p.border.lerp_to_gamma(p.accent, 0.5) };
                         painter.rect_stroke(row_rect.shrink(0.5), 2.0, egui::Stroke::new(w, color), egui::StrokeKind::Inside);
                     }
+                };
+                row.col(|ui| {
+                    background(ui);
                     ui.add_space(4.0);
                     let icon = if e.is_parent {
                         "⮪"
@@ -437,10 +452,12 @@ fn file_table(ui: &mut egui::Ui, tab: &mut Tab, cx: &Context<'_>, header_h: f32,
                     ui.label(text(format!("{icon} {name}")));
                 });
                 row.col(|ui| {
+                    background(ui);
                     ui.add_space(4.0);
                     ui.label(text(ext.to_string()));
                 });
                 row.col(|ui| {
+                    background(ui);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(6.0);
                         let s = if e.is_parent {
@@ -454,6 +471,8 @@ fn file_table(ui: &mut egui::Ui, tab: &mut Tab, cx: &Context<'_>, header_h: f32,
                     });
                 });
                 row.col(|ui| {
+                    background(ui);
+                    outline(ui);
                     ui.add_space(6.0);
                     let s = e.modified.map(|t| DateTime::<Local>::from(t).format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
                     ui.label(text(s));

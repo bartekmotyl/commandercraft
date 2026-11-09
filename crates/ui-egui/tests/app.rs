@@ -343,3 +343,34 @@ fn cjk_file_names_render_with_system_fonts() {
     h.run_steps(3);
     snapshot(&mut h, "16-cjk");
 }
+
+#[test]
+fn ctrl_page_down_opens_any_archive_and_rows_paint_fully() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fixture(root);
+    fs::copy(root.join("left/pack.zip"), root.join("left/book.epub")).unwrap();
+    let mut h = harness(root);
+    h.state_mut().settings_mut().appearance.theme = commandercraft_core::settings::ThemeChoice::Dark;
+    h.run_steps(3);
+
+    // Mouse over a row, then keys: the hover highlight goes away until the mouse moves again.
+    h.event(egui::Event::PointerMoved(egui::pos2(120.0, 240.0)));
+    h.run_steps(2);
+    // The cursor on an odd (striped) row: the highlight must cover all four columns.
+    select(&mut h, "b.md");
+    snapshot(&mut h, "17-odd-row-dark-no-hover");
+
+    // Enter on an .epub opens it with an app; Ctrl+PageDown goes into it as a zip.
+    select(&mut h, "book.epub");
+    key_mod(&mut h, Key::PageDown, Modifiers::COMMAND);
+    assert_eq!(names(&h, 0), ["..", "docs", "top.txt"]);
+    key_mod(&mut h, Key::PageUp, Modifiers::COMMAND);
+    assert_eq!(cursor_name(&h), "book.epub");
+
+    // A file that is no archive: a message, and the panel stays.
+    select(&mut h, "a.txt");
+    key_mod(&mut h, Key::PageDown, Modifiers::COMMAND);
+    assert!(h.state().has_dialog());
+    assert_eq!(cursor_name(&h), "a.txt");
+}

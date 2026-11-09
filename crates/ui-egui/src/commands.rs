@@ -17,6 +17,7 @@ use crate::{CommanderApp, JobKind, QuickView, describe};
 pub(crate) enum Cmd {
     Open,
     OpenSystem,
+    OpenAsArchive,
     View,
     QuickView,
     Edit,
@@ -59,6 +60,7 @@ impl CommanderApp {
         match cmd {
             Cmd::Open => self.open_entry(false),
             Cmd::OpenSystem => self.open_entry(true),
+            Cmd::OpenAsArchive => self.open_as_archive(),
             Cmd::View => {
                 if let Some((e, path)) = self.cursor_file() {
                     match Viewer::open(&path, e.name.clone(), VIEW_LIMIT) {
@@ -243,6 +245,30 @@ impl CommanderApp {
             _ => launch::open_default(&path),
         };
         self.launch(result, &path);
+    }
+
+    /// Ctrl+PageDown: go into the file under the cursor as an archive, whatever its extension
+    /// (`.epub`, `.docx`, `.jar`… are zips); the format is recognised from the content.
+    fn open_as_archive(&mut self) {
+        let a = self.active;
+        let Some(e) = self.tab().current().cloned() else { return };
+        if e.is_dir {
+            return self.open_entry(false);
+        }
+        let path = match self.tab().location.clone() {
+            Location::Local(dir) => dir.join(&e.name),
+            Location::Archive { archive, inner } => match self.extract_temp(&archive, &archive::join(&inner, &e.name)) {
+                Ok(p) => p,
+                Err(err) => return self.message("Cannot extract", err),
+            },
+        };
+        if archive::detect_content(&path).is_none() {
+            return self.message(
+                "Open as archive",
+                format!("\"{}\" is not an archive CommanderCraft can open (zip, tar, gzip, bzip2, xz).", e.name),
+            );
+        }
+        self.navigate(a, Location::Archive { archive: path, inner: String::new() }, None);
     }
 
     fn start_transfer(&mut self, mv: bool) {
@@ -546,12 +572,15 @@ impl CommanderApp {
         let shift = m.shift;
         let alt = m.alt;
         let page = self.panels[self.active].page_rows.max(1) as isize;
+        self.keyboard_nav = true;
         let c = match key {
             Key::ArrowUp if cmd => Some(Cmd::OpenInNewTab { other_side: shift }),
             Key::ArrowLeft if cmd => Some(Cmd::OpenInSide(0)),
             Key::ArrowRight if cmd => Some(Cmd::OpenInSide(1)),
             Key::ArrowUp => return self.move_by(-1, shift),
             Key::ArrowDown => return self.move_by(1, shift),
+            Key::PageDown if cmd => Some(Cmd::OpenAsArchive),
+            Key::PageUp if cmd => Some(Cmd::GoUp),
             Key::PageUp => return self.move_by(-page, shift),
             Key::PageDown => return self.move_by(page, shift),
             Key::Home => return self.move_by(isize::MIN / 2, shift),
