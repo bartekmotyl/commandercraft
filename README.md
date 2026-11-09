@@ -4,9 +4,20 @@ A keyboard-driven, two-panel file manager in Rust, in the tradition of the class
 managers — with a native GUI on Windows, macOS and Linux. Clean-room: built from observed behaviour
 only, no code, icons or texts from existing products.
 
+## Download
+
+Every push to `main` is built for Windows, macOS (universal: Apple Silicon and Intel) and Linux, and
+published as the [latest-main pre-release](https://github.com/bartekmotyl/commandercraft/releases/tag/latest-main).
+The macOS app is not notarized yet: the first time, right-click it and choose Open.
+
+## Build
+
 ```
 cargo run --release -p commandercraft
 ```
+
+CI (`.github/workflows/ci.yml`) checks formatting and clippy, runs the tests on all three systems for
+every pull request, and builds the release packages for pushes to `main`.
 
 ## Layout
 

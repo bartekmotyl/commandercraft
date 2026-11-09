@@ -1,0 +1,160 @@
+# Tests on every pull request and push; on pushes to main, also release builds for Windows, macOS
+# (universal .app) and Linux, published as the rolling "latest-main" pre-release.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  lint:
+    name: Format and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Linux libraries
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  build:
+    name: Release build (${{ matrix.name }})
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: [lint, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+          - name: macos-universal
+            os: macos-latest
+          - name: linux-x64
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.name == 'macos-universal' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.name }}
+
+      - name: Version
+        id: version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release --locked -p commandercraft
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/commandercraft.exe dist/CommanderCraft.exe
+          Copy-Item README.md, LICENSE dist/
+          Compress-Archive -Path dist/* -DestinationPath CommanderCraft-windows-x64.zip
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release --locked -p commandercraft
+          mkdir -p dist/commandercraft
+          cp target/release/commandercraft README.md LICENSE dist/commandercraft/
+          tar -C dist -czf CommanderCraft-linux-x64.tar.gz commandercraft
+
+      - name: Build (macOS, universal app)
+        if: runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          cargo build --release --locked -p commandercraft --target aarch64-apple-darwin
+          cargo build --release --locked -p commandercraft --target x86_64-apple-darwin
+          app=dist/CommanderCraft.app
+          mkdir -p "$app/Contents/MacOS"
+          lipo -create -output "$app/Contents/MacOS/commandercraft" \
+            target/aarch64-apple-darwin/release/commandercraft \
+            target/x86_64-apple-darwin/release/commandercraft
+          sed "s/__VERSION__/${{ steps.version.outputs.version }}/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          # Ad-hoc signature: required on Apple Silicon; not a Developer ID (Gatekeeper will still ask).
+          codesign --force --deep --sign - "$app"
+          ditto -c -k --keepParent "$app" CommanderCraft-macos-universal.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CommanderCraft-${{ matrix.name }}
+          path: CommanderCraft-${{ matrix.name }}.*
+          if-no-files-found: error
+
+  release:
+    name: Publish latest-main pre-release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-latest-main
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Replace the latest-main release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -l artifacts
+          gh release delete latest-main --yes --cleanup-tag || true
+          # Quoted heredoc: the backticks are Markdown, not shell.
+          cat > notes.md <<'EOF'
+          Automatic build of `main`, replaced on every push.
+
+          - **Windows**: unzip and run `CommanderCraft.exe`.
+          - **macOS** (Apple Silicon and Intel): unzip and move `CommanderCraft.app` to Applications. The app is not notarized: the first time, right-click it and choose Open, or run `xattr -dr com.apple.quarantine /Applications/CommanderCraft.app`.
+          - **Linux**: `tar xzf` the archive and run `commandercraft/commandercraft`.
+          EOF
+          printf '\nCommit: %s\n' "$GITHUB_SHA" >> notes.md
+          gh release create latest-main artifacts/* \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Latest main (${GITHUB_SHA::7})" \
+            --notes-file notes.md
