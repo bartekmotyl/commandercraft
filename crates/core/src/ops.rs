@@ -37,7 +37,7 @@ pub struct Report {
 }
 
 impl Report {
-    fn merge(&mut self, other: Report) {
+    pub fn merge(&mut self, other: Report) {
         self.files += other.files;
         self.dirs += other.dirs;
         self.skipped += other.skipped;

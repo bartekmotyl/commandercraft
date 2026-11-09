@@ -8,8 +8,10 @@ use commandercraft_core::settings::Bookmark;
 use commandercraft_core::sort::{Sort, SortColumn, sort_entries};
 use commandercraft_core::volumes::{self, Volume};
 use commandercraft_core::{Entry, Location, archive, format_bytes_grouped, format_size, vfs};
-use egui::{Align, Color32, Layout, RichText, Sense};
+use egui::{Align, Layout, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
+
+use crate::theme::Palette;
 
 /// A folder shown in a panel, with cursor, marked entries and sort order.
 pub struct Tab {
@@ -200,31 +202,38 @@ pub struct Context<'a> {
     pub bookmarks: &'a [Bookmark],
     pub volumes: &'a [Volume],
     pub id: &'a str,
+    pub row_h: f32,
+    pub monospace: bool,
+    pub palette: Palette,
 }
-
-const ROW_H: f32 = 18.0;
-const MARKED: Color32 = Color32::from_rgb(230, 70, 60);
 
 pub fn show(ui: &mut egui::Ui, panel: &mut Panel, cx: &Context<'_>) -> Vec<Action> {
     let mut actions = Vec::new();
-    let accent = if cx.active { ui.visuals().selection.stroke.color } else { ui.visuals().widgets.noninteractive.bg_stroke.color };
-    let frame =
-        egui::Frame::new().stroke(egui::Stroke::new(if cx.active { 1.5 } else { 1.0 }, accent)).inner_margin(3.0).corner_radius(3.0);
+    // Same stroke width either way: only the colour says which panel is active, so nothing moves.
+    let stroke = egui::Stroke::new(1.0, if cx.active { cx.palette.accent } else { cx.palette.border });
+    let frame = egui::Frame::new().stroke(stroke).inner_margin(3.0).corner_radius(4.0);
     let resp = frame.show(ui, |ui| {
         ui.set_min_size(ui.available_size());
         tab_strip(ui, panel, &mut actions);
         path_bar(ui, panel, cx, &mut actions);
         ui.add_space(2.0);
-        let status_h = 18.0;
-        let header_h = 20.0 + 3.0 * ui.spacing().item_spacing.y;
-        let table_h = (ui.available_height() - status_h - header_h - 6.0).max(ROW_H * 3.0);
-        panel.page_rows = ((table_h - ROW_H) / (ROW_H + ui.spacing().item_spacing.y)).max(1.0) as usize;
-        ui.push_id(cx.id, |ui| file_table(ui, panel.tab_mut(), cx, table_h, &mut actions));
+        let status_h = ui.text_style_height(&egui::TextStyle::Small) + 6.0;
+        let header_h = cx.row_h + 2.0;
+        let table_h = (ui.available_height() - status_h - header_h).max(cx.row_h * 3.0);
+        panel.page_rows = (table_h / cx.row_h).max(1.0) as usize;
+        ui.push_id(cx.id, |ui| file_table(ui, panel.tab_mut(), cx, header_h, table_h, &mut actions));
         ui.add_space(2.0);
         status_line(ui, panel.tab());
     });
+    // A press inside the panel activates it, unless a menu or dialog above it took the press.
     let rect = resp.response.rect;
-    if ui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| rect.contains(p))) {
+    let layer = ui.layer_id();
+    // Read the press first: `layer_id_at` takes egui's context lock, so it must not run inside `input`.
+    let press = ui.input(|i| if i.pointer.any_pressed() { i.pointer.interact_pos() } else { None });
+    if let Some(p) = press
+        && rect.contains(p)
+        && ui.ctx().layer_id_at(p) == Some(layer)
+    {
         actions.insert(0, Action::Activate);
     }
     actions
@@ -326,8 +335,8 @@ fn path_bar(ui: &mut egui::Ui, panel: &mut Panel, cx: &Context<'_>, actions: &mu
     });
 }
 
-/// A typed path: a folder, or an archive file (opened at its root).
-fn parse_location(text: &str) -> Location {
+/// A typed or pasted path: a folder, or an archive file (opened at its root).
+pub fn parse_location(text: &str) -> Location {
     let path = PathBuf::from(text.trim());
     if path.is_file() && archive::detect(&path).is_some() {
         Location::Archive { archive: path, inner: String::new() }
@@ -336,11 +345,16 @@ fn parse_location(text: &str) -> Location {
     }
 }
 
-fn file_table(ui: &mut egui::Ui, tab: &mut Tab, cx: &Context<'_>, height: f32, actions: &mut Vec<Action>) {
-    ui.style_mut().interaction.selectable_labels = false;
+fn file_table(ui: &mut egui::Ui, tab: &mut Tab, cx: &Context<'_>, header_h: f32, height: f32, actions: &mut Vec<Action>) {
     let ctx = ui.ctx().clone();
     let weak = ui.visuals().weak_text_color();
-    let cursor_stroke = egui::Stroke::new(1.0, ui.visuals().selection.stroke.color);
+    let p = cx.palette;
+    // Cells tile the row exactly (no spacing), so painted row backgrounds have no gaps.
+    ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+    let table_x = ui.available_rect_before_wrap().x_range();
+    let layer = ui.layer_id();
+    let hover_pos = ctx.pointer_hover_pos().filter(|pos| ctx.layer_id_at(*pos) == Some(layer));
+    let scale = cx.row_h / 19.0;
     let mut builder = TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
@@ -350,19 +364,21 @@ fn file_table(ui: &mut egui::Ui, tab: &mut Tab, cx: &Context<'_>, height: f32, a
         .max_scroll_height(height)
         .cell_layout(Layout::left_to_right(Align::Center))
         .column(Column::remainder().at_least(120.0).clip(true))
-        .column(Column::initial(48.0).at_least(24.0).clip(true))
-        .column(Column::initial(84.0).at_least(40.0).clip(true))
-        .column(Column::initial(118.0).at_least(40.0).clip(true));
+        .column(Column::initial(52.0 * scale).at_least(24.0).clip(true))
+        .column(Column::initial(90.0 * scale).at_least(40.0).clip(true))
+        .column(Column::initial(128.0 * scale).at_least(40.0).clip(true));
     if std::mem::take(&mut tab.scroll_to_cursor) {
         builder = builder.scroll_to_row(tab.cursor, None);
     }
     let sort = tab.sort;
+    let mono = cx.monospace;
     builder
-        .header(20.0, |mut header| {
+        .header(header_h, |mut header| {
             for (column, label) in
                 [(SortColumn::Name, "Name"), (SortColumn::Ext, "Ext"), (SortColumn::Size, "Size"), (SortColumn::Modified, "Date")]
             {
                 header.col(|ui| {
+                    ui.add_space(4.0);
                     let arrow = if sort.column == column { if sort.descending { " ⏷" } else { " ⏶" } } else { "" };
                     if ui.add(egui::Button::new(RichText::new(format!("{label}{arrow}")).strong()).frame(false)).clicked() {
                         actions.push(Action::Sort(column));
@@ -371,35 +387,43 @@ fn file_table(ui: &mut egui::Ui, tab: &mut Tab, cx: &Context<'_>, height: f32, a
             }
         })
         .body(|body| {
-            body.rows(ROW_H, tab.entries.len(), |mut row| {
+            body.rows(cx.row_h, tab.entries.len(), |mut row| {
                 let i = row.index();
                 let e = &tab.entries[i];
                 let is_cursor = i == tab.cursor;
-                row.set_selected(is_cursor && cx.active);
                 let marked = tab.marked.contains(&e.name);
-                let color = if marked {
-                    Some(MARKED)
-                } else if e.hidden {
-                    Some(weak)
-                } else {
-                    None
-                };
                 let text = |s: String| {
                     let t = RichText::new(s);
-                    let t = if let Some(c) = color { t.color(c) } else { t };
-                    if marked { t.strong() } else { t }
-                };
-                // The inactive panel shows its cursor as an outline.
-                let outline = |ui: &mut egui::Ui| {
-                    if is_cursor && !cx.active {
-                        let r = ui.max_rect().shrink2(egui::vec2(0.0, 1.0));
-                        ui.painter().hline(r.x_range(), r.top(), cursor_stroke);
-                        ui.painter().hline(r.x_range(), r.bottom(), cursor_stroke);
+                    let t = if mono { t.monospace() } else { t };
+                    if marked {
+                        t.color(p.marked_text).strong()
+                    } else if e.hidden {
+                        t.color(weak)
+                    } else {
+                        t
                     }
                 };
                 let (stem, ext) = e.stem_ext();
                 row.col(|ui| {
-                    outline(ui);
+                    // The row background (hover, marked, cursor), painted across the whole row.
+                    let cell = ui.max_rect();
+                    let row_rect = egui::Rect::from_x_y_ranges(table_x, cell.y_range());
+                    let clip = egui::Rect::from_x_y_ranges(table_x, ui.clip_rect().y_range());
+                    let painter = egui::Painter::new(ui.ctx().clone(), ui.layer_id(), clip);
+                    if hover_pos.is_some_and(|pos| row_rect.contains(pos)) {
+                        painter.rect_filled(row_rect, 0.0, p.hover);
+                    }
+                    if marked {
+                        painter.rect_filled(row_rect, 0.0, p.marked);
+                    } else if is_cursor && cx.active {
+                        painter.rect_filled(row_rect, 0.0, p.accent_soft);
+                    }
+                    if is_cursor {
+                        let w = if cx.active { 1.5 } else { 1.0 };
+                        let color = if cx.active { p.accent } else { p.border.lerp_to_gamma(p.accent, 0.5) };
+                        painter.rect_stroke(row_rect.shrink(0.5), 2.0, egui::Stroke::new(w, color), egui::StrokeKind::Inside);
+                    }
+                    ui.add_space(4.0);
                     let icon = if e.is_parent {
                         "⮪"
                     } else if e.is_dir {
@@ -413,12 +437,12 @@ fn file_table(ui: &mut egui::Ui, tab: &mut Tab, cx: &Context<'_>, height: f32, a
                     ui.label(text(format!("{icon} {name}")));
                 });
                 row.col(|ui| {
-                    outline(ui);
+                    ui.add_space(4.0);
                     ui.label(text(ext.to_string()));
                 });
                 row.col(|ui| {
-                    outline(ui);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_space(6.0);
                         let s = if e.is_parent {
                             String::new()
                         } else if e.is_dir {
@@ -430,7 +454,7 @@ fn file_table(ui: &mut egui::Ui, tab: &mut Tab, cx: &Context<'_>, height: f32, a
                     });
                 });
                 row.col(|ui| {
-                    outline(ui);
+                    ui.add_space(6.0);
                     let s = e.modified.map(|t| DateTime::<Local>::from(t).format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
                     ui.label(text(s));
                 });
@@ -441,13 +465,10 @@ fn file_table(ui: &mut egui::Ui, tab: &mut Tab, cx: &Context<'_>, height: f32, a
                     let mods = ctx.input(|i| i.modifiers);
                     if mods.command {
                         tab.toggle_mark(i);
-                        tab.cursor = i;
                     } else if mods.shift {
                         tab.mark_range(tab.cursor, i);
-                        tab.cursor = i;
-                    } else {
-                        tab.cursor = i;
                     }
+                    tab.cursor = i;
                 }
                 if r.secondary_clicked() {
                     tab.toggle_mark(i);

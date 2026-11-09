@@ -288,6 +288,43 @@ fn zip_err(e: zip::result::ZipError) -> io::Error {
 // ---------------------------------------------------------------------------------------------
 // Extraction
 
+/// The archive's name without its archive extension: `logs.tar.gz` → `logs`, `a.b.zip` → `a.b`.
+pub fn base_name(path: &Path) -> String {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let lower = name.to_lowercase();
+    for suffix in [".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".tbz2", ".tbz", ".txz", ".tar", ".zip", ".jar", ".gz", ".bz2", ".xz"] {
+        if lower.ends_with(suffix) && name.len() > suffix.len() {
+            return name[..name.len() - suffix.len()].to_string();
+        }
+    }
+    name
+}
+
+/// Extract whole archives into `dest`; with `own_folder`, each into `dest/<archive base name>`.
+pub fn extract_all(archives: &[std::path::PathBuf], dest: &Path, own_folder: bool, overwrite: bool, r: &mut dyn Reporter) -> Report {
+    let mut report = Report::default();
+    for a in archives {
+        if r.cancelled() {
+            report.cancelled = true;
+            break;
+        }
+        let target = if own_folder { dest.join(base_name(a)) } else { dest.to_path_buf() };
+        if let Err(e) = fs::create_dir_all(&target) {
+            report.errors.push(format!("{}: {e}", target.display()));
+            continue;
+        }
+        let items: Vec<String> = match index(a) {
+            Ok(idx) => idx.list("").into_iter().map(|e| e.name).collect(),
+            Err(e) => {
+                report.errors.push(format!("{}: {e}", a.display()));
+                continue;
+            }
+        };
+        report.merge(extract(a, &items, &target, overwrite, r));
+    }
+    report
+}
+
 /// Extract `items` (paths inside the archive, files or folders) into the folder `dest`.
 /// Existing files are skipped unless `overwrite`.
 pub fn extract(archive: &Path, items: &[String], dest: &Path, overwrite: bool, reporter: &mut dyn Reporter) -> Report {

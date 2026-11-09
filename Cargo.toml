@@ -26,6 +26,13 @@ liblzma = { version = "0.4", features = ["static"] }
 # OS
 open = "5"
 trash = "5"
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+arboard = { version = "3", default-features = false }
+fontdb = "0.24"
+
+# text
+encoding_rs = "0.8"
+chardetng = "1"
 
 # ui
 egui = "0.36"

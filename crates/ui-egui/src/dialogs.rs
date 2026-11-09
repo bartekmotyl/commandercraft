@@ -1,11 +1,13 @@
-//! Modal dialogs: copy / move, new folder, rename, delete, messages, bookmarks, settings.
-//! Enter confirms, Escape (or a click outside) cancels.
+//! Dialogs: copy / move, extract, new folder, rename, delete, messages, bookmarks, settings.
+//! Enter confirms, Escape (or a click outside a modal) cancels.
 
 use std::path::{Path, PathBuf};
 
-use commandercraft_core::settings::{Association, Bookmark, Settings};
+use commandercraft_core::settings::{Association, Bookmark, Settings, ThemeChoice};
 use egui::text::{CCursor, CCursorRange};
 use egui::{Id, Key, RichText};
+
+use crate::fonts::SystemFonts;
 
 /// What a copy / move acts on.
 pub enum Sources {
@@ -19,6 +21,7 @@ pub enum Sources {
 
 pub enum Dialog {
     Transfer { mv: bool, sources: Sources, summary: String, dest: String, overwrite: bool },
+    Extract { archives: Vec<PathBuf>, summary: String, dest: String, own_folder: bool, overwrite: bool },
     Mkdir { dir: PathBuf, name: String },
     Rename { src: PathBuf, name: String },
     Delete { paths: Vec<PathBuf>, permanent: bool, summary: String },
@@ -35,10 +38,19 @@ pub enum Outcome {
     GoTo(PathBuf),
 }
 
+pub struct Env<'a> {
+    pub bookmarks: &'a mut Vec<Bookmark>,
+    pub current: Option<&'a Path>,
+    pub fonts: Option<&'a SystemFonts>,
+}
+
 /// `fresh` is true on the first frame, to focus the text field.
-pub fn show(ctx: &egui::Context, dialog: &mut Dialog, fresh: bool, bookmarks: &mut Vec<Bookmark>, current: Option<&Path>) -> Outcome {
+pub fn show(ctx: &egui::Context, dialog: &mut Dialog, fresh: bool, env: Env<'_>) -> Outcome {
+    if let Dialog::Bookmarks = dialog {
+        return bookmarks_window(ctx, env.bookmarks, env.current);
+    }
     let resp = egui::Modal::new(Id::new("cc_dialog")).show(ctx, |ui| {
-        ui.set_min_width(420.0);
+        ui.set_min_width(460.0);
         let enter = ui.input(|i| i.key_pressed(Key::Enter));
         let mut out = Outcome::Open;
         match dialog {
@@ -48,6 +60,20 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, fresh: bool, bookmarks: &m
                 text_field(ui, dest, fresh, None);
                 ui.checkbox(overwrite, "Overwrite existing files");
                 out = buttons(ui, if *mv { "Move" } else { "Copy" }, enter);
+            }
+            Dialog::Extract { summary, dest, own_folder, overwrite, archives } => {
+                ui.heading("Extract");
+                ui.label(format!("Extract {summary} to:"));
+                text_field(ui, dest, fresh, None);
+                ui.radio_value(own_folder, false, "Directly into this folder");
+                let example = archives.first().map(|a| commandercraft_core::archive::base_name(a)).unwrap_or_default();
+                ui.radio_value(
+                    own_folder,
+                    true,
+                    format!("Into a folder named after each archive  ({example}{}…)", std::path::MAIN_SEPARATOR),
+                );
+                ui.checkbox(overwrite, "Overwrite existing files");
+                out = buttons(ui, "Extract", enter);
             }
             Dialog::Mkdir { dir, name } => {
                 ui.heading("New folder");
@@ -82,8 +108,8 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, fresh: bool, bookmarks: &m
                     out = Outcome::Cancel;
                 }
             }
-            Dialog::Bookmarks => out = bookmarks_ui(ui, bookmarks, current),
-            Dialog::Settings(draft) => out = settings_ui(ui, draft),
+            Dialog::Settings(draft) => out = settings_ui(ui, draft, env.fonts),
+            Dialog::Bookmarks => {}
         }
         out
     });
@@ -117,57 +143,94 @@ fn buttons(ui: &mut egui::Ui, ok: &str, enter: bool) -> Outcome {
     out
 }
 
-fn bookmarks_ui(ui: &mut egui::Ui, bookmarks: &mut Vec<Bookmark>, current: Option<&Path>) -> Outcome {
+/// Bookmarks: a resizable window (names and paths need room).
+fn bookmarks_window(ctx: &egui::Context, bookmarks: &mut Vec<Bookmark>, current: Option<&Path>) -> Outcome {
     let mut out = Outcome::Open;
-    ui.heading("Bookmarks");
-    ui.label(RichText::new("Click a name to go there, or press its number.").small());
-    const DIGITS: [Key; 9] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
-    let digit =
-        if ui.ctx().text_edit_focused() { None } else { ui.input(|i| DIGITS.iter().position(|k| i.key_pressed(*k)).map(|p| p + 1)) };
-    let mut remove = None;
-    let mut swap = None;
-    egui::Grid::new("cc_bookmarks").num_columns(4).striped(true).show(ui, |ui| {
-        let n = bookmarks.len();
-        for (i, b) in bookmarks.iter_mut().enumerate() {
-            ui.label(if i < 9 { format!("{}", i + 1) } else { String::new() });
-            if ui.link(b.path.display().to_string()).clicked() || digit == Some(i + 1) {
-                out = Outcome::GoTo(b.path.clone());
+    let mut open = true;
+    egui::Window::new("Bookmarks")
+        .id(Id::new("cc_bookmarks_window"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_size([760.0, 420.0])
+        .min_size([420.0, 200.0])
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.content_rect().center())
+        .show(ctx, |ui| {
+            ui.set_min_size(ui.available_size());
+            ui.label(RichText::new("Click a path to go there, or press its number. Names can be edited.").small());
+            ui.add_space(4.0);
+            const DIGITS: [Key; 9] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
+            let digit = if ui.ctx().text_edit_focused() {
+                None
+            } else {
+                ui.input(|i| DIGITS.iter().position(|k| i.key_pressed(*k)).map(|p| p + 1))
+            };
+            let mut remove = None;
+            let mut swap = None;
+            let footer_h = 34.0;
+            let name_w = (ui.available_width() * 0.3).clamp(140.0, 320.0);
+            egui::ScrollArea::vertical().max_height((ui.available_height() - footer_h).max(60.0)).auto_shrink([false, true]).show(
+                ui,
+                |ui| {
+                    // Rows with explicit widths (a Grid would shrink the name fields).
+                    let n = bookmarks.len();
+                    let row_h = ui.spacing().interact_size.y;
+                    for (i, b) in bookmarks.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.add_sized([18.0, row_h], egui::Label::new(if i < 9 { format!("{}", i + 1) } else { String::new() }));
+                            ui.add_sized([name_w, row_h], egui::TextEdit::singleline(&mut b.name).hint_text("name"));
+                            let path_w = (ui.available_width() - 84.0).max(120.0);
+                            let link = ui
+                                .allocate_ui_with_layout(
+                                    egui::vec2(path_w, row_h),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.set_min_width(path_w);
+                                        ui.add(egui::Link::new(b.path.display().to_string()))
+                                    },
+                                )
+                                .inner;
+                            if link.clicked() || digit == Some(i + 1) {
+                                out = Outcome::GoTo(b.path.clone());
+                            }
+                            if ui.add_enabled(i > 0, egui::Button::new("⏶").small()).clicked() {
+                                swap = Some(i - 1);
+                            }
+                            if ui.add_enabled(i + 1 < n, egui::Button::new("⏷").small()).clicked() {
+                                swap = Some(i);
+                            }
+                            if ui.small_button("✖").on_hover_text("Remove").clicked() {
+                                remove = Some(i);
+                            }
+                        });
+                    }
+                    if bookmarks.is_empty() {
+                        ui.label("No bookmarks yet.");
+                    }
+                },
+            );
+            if let Some(i) = swap {
+                bookmarks.swap(i, i + 1);
             }
-            ui.add(egui::TextEdit::singleline(&mut b.name).desired_width(140.0).hint_text("name"));
+            if let Some(i) = remove {
+                bookmarks.remove(i);
+            }
+            ui.separator();
             ui.horizontal(|ui| {
-                if ui.add_enabled(i > 0, egui::Button::new("⏶").small()).clicked() {
-                    swap = Some(i - 1);
+                if let Some(dir) = current
+                    && ui.button("Add current folder").clicked()
+                {
+                    add_bookmark(bookmarks, dir);
                 }
-                if ui.add_enabled(i + 1 < n, egui::Button::new("⏷").small()).clicked() {
-                    swap = Some(i);
-                }
-                if ui.small_button("✖").on_hover_text("Remove").clicked() {
-                    remove = Some(i);
+                if ui.button("Close").clicked() {
+                    out = Outcome::Cancel;
                 }
             });
-            ui.end_row();
-        }
-    });
-    if let Some(i) = swap {
-        bookmarks.swap(i, i + 1);
+        });
+    if !open || (matches!(out, Outcome::Open) && ctx.input(|i| i.key_pressed(Key::Escape))) {
+        out = Outcome::Cancel;
     }
-    if let Some(i) = remove {
-        bookmarks.remove(i);
-    }
-    if bookmarks.is_empty() {
-        ui.label("No bookmarks yet.");
-    }
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        if let Some(dir) = current
-            && ui.button("Add current folder").clicked()
-        {
-            add_bookmark(bookmarks, dir);
-        }
-        if ui.button("Close").clicked() {
-            out = Outcome::Cancel;
-        }
-    });
     out
 }
 
@@ -179,37 +242,86 @@ pub fn add_bookmark(bookmarks: &mut Vec<Bookmark>, dir: &Path) {
     bookmarks.push(Bookmark { name, path: dir.to_path_buf() });
 }
 
-fn settings_ui(ui: &mut egui::Ui, s: &mut Settings) -> Outcome {
-    ui.heading("Settings");
-    ui.add_space(4.0);
-    ui.label("Editor (F4) — empty uses the system default:");
-    ui.add(egui::TextEdit::singleline(&mut s.editor).desired_width(f32::INFINITY).hint_text(editor_hint()));
-    ui.add_space(8.0);
-    ui.label("Open files with (Enter / double-click), by extension:");
-    ui.label(RichText::new("Put {file} where the path goes; otherwise it is appended.").small());
-    let mut remove = None;
-    egui::Grid::new("cc_assoc").num_columns(3).show(ui, |ui| {
-        ui.label(RichText::new("Extensions").small());
-        ui.label(RichText::new("Command").small());
-        ui.end_row();
-        for (i, a) in s.associations.iter_mut().enumerate() {
-            ui.add(egui::TextEdit::singleline(&mut a.extensions).desired_width(110.0).hint_text("txt, md"));
-            ui.add(egui::TextEdit::singleline(&mut a.command).desired_width(320.0).hint_text(editor_hint()));
-            if ui.small_button("✖").clicked() {
-                remove = Some(i);
-            }
-            ui.end_row();
+fn font_combo(ui: &mut egui::Ui, id: &str, value: &mut String, families: &[String]) {
+    let shown = if value.is_empty() { "Built-in".to_string() } else { value.clone() };
+    egui::ComboBox::from_id_salt(id).selected_text(shown).width(260.0).height(360.0).show_ui(ui, |ui| {
+        ui.selectable_value(value, String::new(), "Built-in");
+        for f in families {
+            ui.selectable_value(value, f.clone(), f);
         }
     });
-    if let Some(i) = remove {
-        s.associations.remove(i);
-    }
-    if ui.button("Add").clicked() {
-        s.associations.push(Association::default());
-    }
-    ui.add_space(8.0);
-    ui.checkbox(&mut s.show_hidden, "Show hidden files");
-    ui.checkbox(&mut s.delete_permanently, "Delete permanently instead of moving to the trash");
+}
+
+fn settings_ui(ui: &mut egui::Ui, s: &mut Settings, fonts: Option<&SystemFonts>) -> Outcome {
+    ui.heading("Settings");
+    ui.add_space(4.0);
+    egui::ScrollArea::vertical().max_height(ui.ctx().content_rect().height() * 0.7).show(ui, |ui| {
+        ui.label(RichText::new("Appearance").strong());
+        egui::Grid::new("cc_appearance").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            ui.label("Theme");
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut s.appearance.theme, ThemeChoice::System, "System");
+                ui.selectable_value(&mut s.appearance.theme, ThemeChoice::Light, "Light");
+                ui.selectable_value(&mut s.appearance.theme, ThemeChoice::Dark, "Dark");
+            });
+            ui.end_row();
+            ui.label("Font");
+            match fonts {
+                Some(f) => font_combo(ui, "cc_font", &mut s.appearance.font, &f.families),
+                None => {
+                    ui.label(RichText::new("(loading system fonts…)").weak());
+                }
+            }
+            ui.end_row();
+            ui.label("Monospace font");
+            match fonts {
+                Some(f) => font_combo(ui, "cc_mono_font", &mut s.appearance.mono_font, &f.mono_families),
+                None => {
+                    ui.label("");
+                }
+            }
+            ui.end_row();
+            ui.label("Text size");
+            ui.add(egui::Slider::new(&mut s.appearance.font_size, 9.0..=24.0).step_by(0.5).suffix(" pt"));
+            ui.end_row();
+            ui.label("File lists");
+            ui.checkbox(&mut s.appearance.list_monospace, "Use the monospace font");
+            ui.end_row();
+        });
+        ui.add_space(10.0);
+        ui.label(RichText::new("Programs").strong());
+        ui.label("Editor (F4) — empty uses the system default:");
+        ui.add(egui::TextEdit::singleline(&mut s.editor).desired_width(f32::INFINITY).hint_text(editor_hint()));
+        ui.label("Terminal — empty uses the system default; {dir} is the folder:");
+        ui.add(egui::TextEdit::singleline(&mut s.terminal).desired_width(f32::INFINITY).hint_text(terminal_hint()));
+        ui.add_space(6.0);
+        ui.label("Open files with (Enter / double-click), by extension:");
+        ui.label(RichText::new("Put {file} where the path goes; otherwise it is appended.").small());
+        let mut remove = None;
+        egui::Grid::new("cc_assoc").num_columns(3).show(ui, |ui| {
+            ui.label(RichText::new("Extensions").small());
+            ui.label(RichText::new("Command").small());
+            ui.end_row();
+            for (i, a) in s.associations.iter_mut().enumerate() {
+                ui.add(egui::TextEdit::singleline(&mut a.extensions).desired_width(110.0).hint_text("txt, md"));
+                ui.add(egui::TextEdit::singleline(&mut a.command).desired_width(320.0).hint_text(editor_hint()));
+                if ui.small_button("✖").clicked() {
+                    remove = Some(i);
+                }
+                ui.end_row();
+            }
+        });
+        if let Some(i) = remove {
+            s.associations.remove(i);
+        }
+        if ui.button("Add").clicked() {
+            s.associations.push(Association::default());
+        }
+        ui.add_space(10.0);
+        ui.label(RichText::new("Behaviour").strong());
+        ui.checkbox(&mut s.show_hidden, "Show hidden files");
+        ui.checkbox(&mut s.delete_permanently, "Delete permanently instead of moving to the trash");
+    });
     ui.add_space(6.0);
     let mut out = Outcome::Open;
     ui.horizontal(|ui| {
@@ -230,5 +342,15 @@ fn editor_hint() -> &'static str {
         r#""C:\Program Files\Notepad++\notepad++.exe"   or   code -n"#
     } else {
         "gedit   or   code -n"
+    }
+}
+
+fn terminal_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "/Applications/iTerm.app   or   wezterm start --cwd {dir}"
+    } else if cfg!(windows) {
+        "wt -d {dir}   or   pwsh -NoExit"
+    } else {
+        "konsole --workdir {dir}"
     }
 }

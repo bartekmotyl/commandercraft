@@ -14,8 +14,10 @@ pub mod launch;
 pub mod ops;
 pub mod settings;
 pub mod sort;
+pub mod text;
 pub mod vfs;
 pub mod volumes;
+pub mod watch;
 
 pub use entry::Entry;
 pub use vfs::Location;

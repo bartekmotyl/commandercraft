@@ -54,6 +54,122 @@ pub fn open_with(command: &str, path: &Path) -> io::Result<()> {
     cmd.spawn().map(|_| ())
 }
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Open a terminal in `dir`. `command` (e.g. `wezterm start --cwd {dir}`) overrides the default:
+/// Windows Terminal or cmd on Windows, Terminal.app on macOS, the first terminal found on Linux.
+/// `{dir}` is replaced by the folder; the program always starts in it.
+pub fn open_terminal(dir: &Path, command: &str) -> io::Result<()> {
+    let d = dir.to_string_lossy();
+    let parts: Vec<String> = split_command(command).into_iter().map(|p| p.replace("{dir}", &d)).collect();
+    if let Some((program, args)) = parts.split_first() {
+        if cfg!(target_os = "macos") && program.trim_end_matches('/').ends_with(".app") {
+            return Command::new("open").arg("-a").arg(program).arg(dir).spawn().map(|_| ());
+        }
+        return Command::new(program).args(args).current_dir(dir).spawn().map(|_| ());
+    }
+    default_terminal(dir)
+}
+
+#[cfg(windows)]
+fn default_terminal(dir: &Path) -> io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    if Command::new("wt").arg("-d").arg(dir).spawn().is_ok() {
+        return Ok(());
+    }
+    Command::new("cmd").args(["/C", "start", "", "cmd.exe"]).current_dir(dir).creation_flags(CREATE_NO_WINDOW).spawn().map(|_| ())
+}
+
+#[cfg(target_os = "macos")]
+fn default_terminal(dir: &Path) -> io::Result<()> {
+    Command::new("open").args(["-a", "Terminal"]).arg(dir).spawn().map(|_| ())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+const LINUX_TERMINALS: [&str; 8] =
+    ["x-terminal-emulator", "gnome-terminal", "konsole", "xfce4-terminal", "kitty", "alacritty", "wezterm", "xterm"];
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn default_terminal(dir: &Path) -> io::Result<()> {
+    let mut last = io::Error::new(io::ErrorKind::NotFound, "no terminal found");
+    for t in LINUX_TERMINALS {
+        match Command::new(t).current_dir(dir).spawn() {
+            Ok(_) => return Ok(()),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// Run a shell command line in `dir` without a window (for starting programs: `code .`, `wt`…).
+pub fn run_shell(dir: &Path, line: &str) -> io::Result<()> {
+    shell(line).current_dir(dir).stdin(std::process::Stdio::null()).spawn().map(|_| ())
+}
+
+#[cfg(windows)]
+fn shell(line: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    let mut c = Command::new("cmd");
+    c.arg("/C").raw_arg(line).creation_flags(CREATE_NO_WINDOW);
+    c
+}
+
+#[cfg(unix)]
+fn shell(line: &str) -> Command {
+    let mut c = Command::new("sh");
+    c.arg("-c").arg(line);
+    c
+}
+
+/// Run a shell command line in `dir` inside a terminal window that stays open, to see its output.
+pub fn run_in_terminal(dir: &Path, line: &str) -> io::Result<()> {
+    run_in_terminal_impl(dir, line)
+}
+
+#[cfg(windows)]
+fn run_in_terminal_impl(dir: &Path, line: &str) -> io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    Command::new("cmd")
+        .arg("/C")
+        .raw_arg(format!("start \"\" cmd.exe /K {line}"))
+        .current_dir(dir)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(target_os = "macos")]
+fn run_in_terminal_impl(dir: &Path, line: &str) -> io::Result<()> {
+    let script = format!("cd {} && {}", sh_quote(&dir.to_string_lossy()), line);
+    let apple = format!("tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell", applescript_escape(&script));
+    Command::new("osascript").arg("-e").arg(apple).spawn().map(|_| ())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn run_in_terminal_impl(dir: &Path, line: &str) -> io::Result<()> {
+    let script = format!("{line}; exec \"${{SHELL:-sh}}\"");
+    let mut last = io::Error::new(io::ErrorKind::NotFound, "no terminal found");
+    for t in LINUX_TERMINALS {
+        match Command::new(t).current_dir(dir).args(["-e", "sh", "-c", &script]).spawn() {
+            Ok(_) => return Ok(()),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// `it's` → `'it'\''s'`: one argument for a POSIX shell.
+#[cfg(unix)]
+pub fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(target_os = "macos")]
+fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Split a command line on whitespace, keeping `"quoted parts"` (and `'single'` ones) together.
 pub fn split_command(s: &str) -> Vec<String> {
     let mut out = Vec::new();
