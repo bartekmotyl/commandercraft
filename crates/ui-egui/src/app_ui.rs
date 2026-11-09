@@ -27,6 +27,9 @@ impl CommanderApp {
         for (key, mods) in std::mem::take(&mut self.keys) {
             self.handle_key(key, mods, &ctx);
         }
+        if ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
+            self.keyboard_nav = false;
+        }
         self.update_quick_view();
 
         let mut cmds: Vec<Cmd> = Vec::new();
@@ -162,6 +165,7 @@ impl CommanderApp {
                 row_h,
                 monospace: self.settings.appearance.list_monospace,
                 palette,
+                show_hover: !self.keyboard_nav,
             };
             actions[side] = panel::show(&mut child, &mut self.panels[side], &cx);
         }
@@ -248,6 +252,7 @@ impl CommanderApp {
         ui.menu_button("Files", |ui| {
             item(ui, "Open", "Enter".into(), Cmd::Open, out);
             item(ui, "Open with system default", "Shift+Enter".into(), Cmd::OpenSystem, out);
+            item(ui, "Open as archive", format!("{c}PgDn"), Cmd::OpenAsArchive, out);
             item(ui, "View", "F3".into(), Cmd::View, out);
             item(ui, "Edit", "F4".into(), Cmd::Edit, out);
             ui.separator();

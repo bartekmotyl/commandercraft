@@ -92,6 +92,8 @@ pub struct CommanderApp {
     quick_view: Option<QuickView>,
     cmdline: String,
     cmdline_focus: bool,
+    /// The cursor was last moved by keyboard: hide the mouse hover until the mouse moves.
+    keyboard_nav: bool,
 }
 
 impl CommanderApp {
@@ -127,6 +129,7 @@ impl CommanderApp {
             quick_view: None,
             cmdline: String::new(),
             cmdline_focus: false,
+            keyboard_nav: false,
         }
     }
 
