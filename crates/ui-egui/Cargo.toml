@@ -15,6 +15,9 @@ egui = { workspace = true }
 egui_extras = { workspace = true }
 eframe = { workspace = true }
 chrono = { workspace = true }
+arboard = { workspace = true }
+fontdb = { workspace = true }
+encoding_rs = { workspace = true }
 
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["wgpu", "eframe"] }

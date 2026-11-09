@@ -31,7 +31,9 @@ fn fixture(root: &Path) {
 fn harness(root: &Path) -> Harness<'static, CommanderApp> {
     let tab = |p: &Path| PanelSession { tabs: vec![TabSession { path: p.to_path_buf(), sort: Default::default() }], active: 0 };
     let settings = Settings { left: tab(&root.join("left")), right: tab(&root.join("right")), ..Default::default() };
-    Harness::builder().with_size(vec2(1100.0, 600.0)).build_ui_state(|ui, app: &mut CommanderApp| app.show(ui), CommanderApp::new(settings))
+    Harness::builder()
+        .with_size(vec2(1100.0, 600.0))
+        .build_ui_state(|ui, app: &mut CommanderApp| app.show(ui), CommanderApp::new(settings).without_system_services())
 }
 
 fn key(h: &mut Harness<'_, CommanderApp>, key: Key) {
@@ -196,4 +198,148 @@ fn mkdir_rename_delete() {
     h.run_steps(3);
     wait_idle(&mut h);
     assert!(!root.join("left/fresh").exists());
+}
+
+#[test]
+fn viewer_quick_view_and_bookmarks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fixture(root);
+    fs::write(root.join("left/notes.txt"), "first line\nsecond line\nzażółć gęślą jaźń\n").unwrap();
+    let mut h = harness(root);
+    h.state_mut().settings_mut().appearance.theme = commandercraft_core::settings::ThemeChoice::Dark;
+    h.run_steps(3);
+
+    // F3 opens the internal viewer; Esc closes it.
+    select(&mut h, "notes.txt");
+    key(&mut h, Key::F3);
+    assert!(h.state().viewer_open());
+    snapshot(&mut h, "10-viewer-dark");
+    h.key_press(Key::Escape);
+    h.run_steps(3);
+    assert!(!h.state().viewer_open());
+
+    // Ctrl+Q (the Control key on every platform) toggles quick view in the other panel.
+    key_mod(&mut h, Key::Q, Modifiers::CTRL);
+    assert!(h.state().quick_view_open());
+    snapshot(&mut h, "11-quick-view-dark");
+    // Tab does not move the focus into the preview.
+    key(&mut h, Key::Tab);
+    assert_eq!(h.state().active_side(), 0);
+    key_mod(&mut h, Key::Q, Modifiers::CTRL);
+    assert!(!h.state().quick_view_open());
+
+    for (name, dir) in [("Projects", "left"), ("Downloads and other long names", "right")] {
+        let path = root.join(dir);
+        h.state_mut().settings_mut().bookmarks.push(commandercraft_core::settings::Bookmark { name: name.into(), path });
+    }
+    // Ctrl+D (Control, also on macOS) opens the bookmarks window.
+    key_mod(&mut h, Key::D, Modifiers::CTRL);
+    assert!(h.state().has_dialog());
+    snapshot(&mut h, "12-bookmarks");
+    h.key_press(Key::Escape);
+    h.run_steps(3);
+    assert!(!h.state().has_dialog());
+}
+
+#[test]
+fn rename_uses_the_active_right_panel() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fixture(root);
+    fs::write(root.join("right/r.txt"), b"right side").unwrap();
+    let mut h = harness(root);
+    h.run_steps(3);
+    key(&mut h, Key::Tab);
+    assert_eq!(h.state().active_side(), 1);
+    select(&mut h, "r.txt");
+    key_mod(&mut h, Key::F6, Modifiers::SHIFT);
+    h.event(egui::Event::Text("moved".into()));
+    h.run_steps(2);
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert!(root.join("right/moved.txt").is_file());
+    assert!(root.join("left/a.txt").is_file(), "the left panel must be untouched");
+    assert_eq!(h.state().active_side(), 1);
+}
+
+#[test]
+fn extract_archives_into_own_folders() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fixture(root);
+    fs::copy(root.join("left/pack.zip"), root.join("left/second.zip")).unwrap();
+    let mut h = harness(root);
+    h.state_mut().settings_mut().appearance.theme = commandercraft_core::settings::ThemeChoice::Light;
+    h.run_steps(3);
+    select(&mut h, "pack.zip");
+    key(&mut h, Key::Space);
+    key(&mut h, Key::Space);
+    key_mod(&mut h, Key::F9, Modifiers::ALT);
+    assert!(h.state().has_dialog());
+    snapshot(&mut h, "13-extract-light");
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    wait_idle(&mut h);
+    assert_eq!(fs::read_to_string(root.join("right/pack/docs/readme.txt")).unwrap(), "zipped readme");
+    assert_eq!(fs::read_to_string(root.join("right/second/top.txt")).unwrap(), "top");
+    assert_eq!(names(&h, 1), ["..", "pack", "second"]);
+    snapshot(&mut h, "14-after-extract-light");
+}
+
+#[test]
+fn menu_click_does_not_steal_panel_focus_and_hover_survives_keys() {
+    use egui_kittest::kittest::Queryable;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fixture(root);
+    fs::write(root.join("right/r.txt"), b"right side").unwrap();
+    let mut h = harness(root);
+    h.run_steps(3);
+    key(&mut h, Key::Tab);
+    select(&mut h, "r.txt");
+
+    // Files ▸ Rename: the menu item lies over the left panel; the right panel must stay active.
+    h.get_by_label("Files").click();
+    h.run_steps(3);
+    let items: Vec<_> = h.get_all_by_label_contains("Rename").collect();
+    let menu_item = items.iter().min_by(|a, b| a.rect().top().total_cmp(&b.rect().top())).expect("menu item");
+    assert!(menu_item.rect().center().x < 550.0, "the menu item should lie over the left panel");
+    menu_item.click();
+    h.run_steps(3);
+    assert_eq!(h.state().active_side(), 1, "clicking a menu item over the left panel activated it");
+    assert!(h.state().has_dialog());
+    h.key_press(Key::Escape);
+    h.run_steps(3);
+
+    // Hover a row in the left panel, then move the cursor by keyboard: the hover stays painted.
+    h.event(egui::Event::PointerMoved(egui::pos2(120.0, 183.0)));
+    h.run_steps(2);
+    key(&mut h, Key::ArrowUp);
+    snapshot(&mut h, "15-hover-after-keys");
+}
+
+/// Needs system CJK fonts (and a GPU for the screenshot): `cargo test -- --ignored cjk`.
+#[test]
+#[ignore]
+fn cjk_file_names_render_with_system_fonts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fixture(root);
+    for name in ["日本語のファイル.txt", "中文文件.txt", "한국어.txt"] {
+        fs::write(root.join("left").join(name), b"x").unwrap();
+    }
+    let tab = |p: &Path| PanelSession { tabs: vec![TabSession { path: p.to_path_buf(), sort: Default::default() }], active: 0 };
+    let settings = Settings { left: tab(&root.join("left")), right: tab(&root.join("right")), ..Default::default() };
+    let mut h = Harness::builder()
+        .with_size(vec2(1100.0, 600.0))
+        .build_ui_state(|ui, app: &mut CommanderApp| app.show(ui), CommanderApp::new(settings));
+    // The font scan runs in the background.
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(8) {
+        h.step();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    h.run_steps(3);
+    snapshot(&mut h, "16-cjk");
 }

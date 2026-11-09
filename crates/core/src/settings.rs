@@ -25,6 +25,48 @@ pub struct Settings {
     pub left: PanelSession,
     pub right: PanelSession,
     pub right_active: bool,
+    pub appearance: Appearance,
+    /// Terminal command (`{dir}` = folder); empty = the system default terminal.
+    pub terminal: String,
+    /// The left panel's share of the width (0.15 – 0.85).
+    pub split: f32,
+    pub viewer_monospace: bool,
+    pub viewer_wrap: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThemeChoice {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Appearance {
+    pub theme: ThemeChoice,
+    /// Interface font family; empty = built-in.
+    pub font: String,
+    /// Monospace font family (viewer, monospace lists); empty = built-in.
+    pub mono_font: String,
+    /// Text size in points.
+    pub font_size: f32,
+    /// Show file lists in the monospace font.
+    pub list_monospace: bool,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Appearance { theme: ThemeChoice::System, font: String::new(), mono_font: String::new(), font_size: 13.0, list_monospace: false }
+    }
+}
+
+impl Settings {
+    /// [`Settings::split`] with the default and limits applied.
+    pub fn split_ratio(&self) -> f32 {
+        if self.split.is_finite() && self.split > 0.0 { self.split.clamp(0.15, 0.85) } else { 0.5 }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
