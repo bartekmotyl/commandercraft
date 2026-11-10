@@ -41,6 +41,7 @@ pub(crate) enum Cmd {
     Sort(SortColumn),
     ToggleHidden,
     Bookmarks,
+    ManageBookmarks,
     AddBookmark,
     GoTo(PathBuf),
     GoToClipboard { new_tab: bool },
@@ -163,7 +164,13 @@ impl CommanderApp {
                 self.settings.show_hidden = !self.settings.show_hidden;
                 self.reload_all_tabs();
             }
-            Cmd::Bookmarks => self.open_dialog(Dialog::Bookmarks),
+            Cmd::Bookmarks => {
+                // Below the tab strip and path bar of the active panel.
+                let r = self.panel_rects[a];
+                let anchor = if r.is_finite() && r.width() > 0.0 { r.min + egui::vec2(10.0, 58.0) } else { egui::pos2(40.0, 120.0) };
+                self.open_dialog(Dialog::QuickBookmarks { selected: 0, anchor });
+            }
+            Cmd::ManageBookmarks => self.open_dialog(Dialog::Bookmarks),
             Cmd::AddBookmark => {
                 let dir = Self::local_folder(&self.tab().location);
                 dialogs::add_bookmark(&mut self.settings.bookmarks, &dir);
@@ -403,7 +410,7 @@ impl CommanderApp {
                 self.style_dirty = true;
                 self.save_settings();
             }
-            Dialog::Message { .. } | Dialog::Bookmarks => {}
+            Dialog::Message { .. } | Dialog::Bookmarks | Dialog::QuickBookmarks { .. } => {}
         }
     }
 

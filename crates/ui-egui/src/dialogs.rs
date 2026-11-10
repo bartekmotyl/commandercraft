@@ -20,13 +20,44 @@ pub enum Sources {
 }
 
 pub enum Dialog {
-    Transfer { mv: bool, sources: Sources, summary: String, dest: String, overwrite: bool },
-    Extract { archives: Vec<PathBuf>, summary: String, dest: String, own_folder: bool, overwrite: bool },
-    Mkdir { dir: PathBuf, name: String },
-    Rename { src: PathBuf, name: String },
-    Delete { paths: Vec<PathBuf>, permanent: bool, summary: String },
-    Message { title: String, text: String },
+    Transfer {
+        mv: bool,
+        sources: Sources,
+        summary: String,
+        dest: String,
+        overwrite: bool,
+    },
+    Extract {
+        archives: Vec<PathBuf>,
+        summary: String,
+        dest: String,
+        own_folder: bool,
+        overwrite: bool,
+    },
+    Mkdir {
+        dir: PathBuf,
+        name: String,
+    },
+    Rename {
+        src: PathBuf,
+        name: String,
+    },
+    Delete {
+        paths: Vec<PathBuf>,
+        permanent: bool,
+        summary: String,
+    },
+    Message {
+        title: String,
+        text: String,
+    },
+    /// The bookmarks manager.
     Bookmarks,
+    /// Ctrl+D: a small list of bookmarks at `anchor`, with "Manage bookmarks…" last.
+    QuickBookmarks {
+        selected: usize,
+        anchor: egui::Pos2,
+    },
     Settings(Box<Settings>),
 }
 
@@ -36,6 +67,8 @@ pub enum Outcome {
     Confirm,
     /// Bookmarks: go to this folder.
     GoTo(PathBuf),
+    /// Quick bookmarks: open the manager.
+    Manage,
 }
 
 pub struct Env<'a> {
@@ -46,8 +79,10 @@ pub struct Env<'a> {
 
 /// `fresh` is true on the first frame, to focus the text field.
 pub fn show(ctx: &egui::Context, dialog: &mut Dialog, fresh: bool, env: Env<'_>) -> Outcome {
-    if let Dialog::Bookmarks = dialog {
-        return bookmarks_window(ctx, env.bookmarks, env.current);
+    match dialog {
+        Dialog::Bookmarks => return bookmarks_window(ctx, env.bookmarks, env.current),
+        Dialog::QuickBookmarks { selected, anchor } => return quick_bookmarks(ctx, env.bookmarks, selected, *anchor),
+        _ => {}
     }
     let resp = egui::Modal::new(Id::new("cc_dialog")).show(ctx, |ui| {
         ui.set_min_width(460.0);
@@ -109,7 +144,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, fresh: bool, env: Env<'_>)
                 }
             }
             Dialog::Settings(draft) => out = settings_ui(ui, draft, env.fonts),
-            Dialog::Bookmarks => {}
+            Dialog::Bookmarks | Dialog::QuickBookmarks { .. } => {}
         }
         out
     });
@@ -143,21 +178,105 @@ fn buttons(ui: &mut egui::Ui, ok: &str, enter: bool) -> Outcome {
     out
 }
 
-/// Bookmarks: a resizable window (names and paths need room).
+/// The quick bookmarks list: ↑ ↓ and Enter, a click, or a digit picks; Esc or a click outside closes.
+fn quick_bookmarks(ctx: &egui::Context, bookmarks: &[Bookmark], selected: &mut usize, anchor: egui::Pos2) -> Outcome {
+    let manage = bookmarks.len(); // index of the last entry
+    let (up, down, enter, escape, digit) = ctx.input(|i| {
+        const DIGITS: [Key; 9] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
+        (
+            i.key_pressed(Key::ArrowUp),
+            i.key_pressed(Key::ArrowDown),
+            i.key_pressed(Key::Enter),
+            i.key_pressed(Key::Escape),
+            DIGITS.iter().position(|k| i.key_pressed(*k)),
+        )
+    });
+    if up {
+        *selected = selected.checked_sub(1).unwrap_or(manage);
+    }
+    if down {
+        *selected = if *selected >= manage { 0 } else { *selected + 1 };
+    }
+    *selected = (*selected).min(manage);
+    let pick = |i: usize| if i == manage { Outcome::Manage } else { Outcome::GoTo(bookmarks[i].path.clone()) };
+    let mut out = Outcome::Open;
+    if let Some(d) = digit.filter(|d| *d < bookmarks.len()) {
+        out = pick(d);
+    } else if enter {
+        out = pick(*selected);
+    } else if escape {
+        out = Outcome::Cancel;
+    }
+
+    let area = egui::Area::new(Id::new("cc_quick_bookmarks")).order(egui::Order::Foreground).fixed_pos(anchor).show(ctx, |ui| {
+        egui::Frame::menu(ui.style()).show(ui, |ui| {
+            let labels: Vec<String> =
+                bookmarks.iter().map(|b| if b.name.trim().is_empty() { b.path.display().to_string() } else { b.name.clone() }).collect();
+            // As wide as the longest entry (plus its number), within limits.
+            let font = egui::TextStyle::Button.resolve(ui.style());
+            let longest = labels
+                .iter()
+                .map(String::as_str)
+                .chain(["Manage bookmarks…"])
+                .map(|s| ctx.fonts_mut(|f| f.layout_no_wrap(s.to_string(), font.clone(), egui::Color32::WHITE).size().x))
+                .fold(0.0, f32::max);
+            let width = (longest + 48.0).clamp(180.0, 480.0);
+            ui.set_width(width);
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+            let entry = |text: String, key: String, selected: bool| {
+                egui::Button::new(text)
+                    .selected(selected)
+                    .frame_when_inactive(selected)
+                    .right_text(RichText::new(key).weak())
+                    .min_size(egui::vec2(width, 0.0))
+            };
+            for (i, (b, label)) in bookmarks.iter().zip(labels).enumerate() {
+                let key = if i < 9 { format!("{}", i + 1) } else { String::new() };
+                let r = ui.add(entry(label, key, i == *selected)).on_hover_text(b.path.display().to_string());
+                if r.hovered() && ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
+                    *selected = i;
+                }
+                if r.clicked() {
+                    out = pick(i);
+                }
+            }
+            if bookmarks.is_empty() {
+                ui.label(RichText::new("No bookmarks yet").weak());
+            }
+            ui.separator();
+            let r = ui.add(entry("Manage bookmarks…".into(), String::new(), *selected == manage));
+            if r.hovered() && ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
+                *selected = manage;
+            }
+            if r.clicked() {
+                out = Outcome::Manage;
+            }
+        });
+    });
+    // A press anywhere else closes the list.
+    let press = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.interact_pos() } else { None });
+    if matches!(out, Outcome::Open) && press.is_some_and(|p| !area.response.rect.contains(p)) {
+        out = Outcome::Cancel;
+    }
+    out
+}
+
+/// The bookmarks manager: rename, reorder, remove, add.
 fn bookmarks_window(ctx: &egui::Context, bookmarks: &mut Vec<Bookmark>, current: Option<&Path>) -> Outcome {
     let mut out = Outcome::Open;
     let mut open = true;
-    egui::Window::new("Bookmarks")
+    // Sized to its content: nothing in it may depend on the available width, or the window would
+    // widen itself a little every frame.
+    let screen = ctx.content_rect();
+    egui::Window::new("Manage bookmarks")
         .id(Id::new("cc_bookmarks_window"))
         .open(&mut open)
         .collapsible(false)
-        .resizable(true)
-        .default_size([760.0, 420.0])
-        .min_size([420.0, 200.0])
+        .resizable(false)
+        .max_width(screen.width() * 0.9)
         .pivot(egui::Align2::CENTER_CENTER)
-        .default_pos(ctx.content_rect().center())
+        .default_pos(screen.center())
         .show(ctx, |ui| {
-            ui.set_min_size(ui.available_size());
             ui.label(RichText::new("Click a path to go there, or press its number. Names can be edited.").small());
             ui.add_space(4.0);
             const DIGITS: [Key; 9] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
@@ -168,48 +287,51 @@ fn bookmarks_window(ctx: &egui::Context, bookmarks: &mut Vec<Bookmark>, current:
             };
             let mut remove = None;
             let mut swap = None;
-            let footer_h = 34.0;
-            let name_w = (ui.available_width() * 0.3).clamp(140.0, 320.0);
-            egui::ScrollArea::vertical().max_height((ui.available_height() - footer_h).max(60.0)).auto_shrink([false, true]).show(
-                ui,
-                |ui| {
-                    // Rows with explicit widths (a Grid would shrink the name fields).
-                    let n = bookmarks.len();
-                    let row_h = ui.spacing().interact_size.y;
-                    for (i, b) in bookmarks.iter_mut().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.add_sized([18.0, row_h], egui::Label::new(if i < 9 { format!("{}", i + 1) } else { String::new() }));
-                            ui.add_sized([name_w, row_h], egui::TextEdit::singleline(&mut b.name).hint_text("name"));
-                            let path_w = (ui.available_width() - 84.0).max(120.0);
-                            let link = ui
-                                .allocate_ui_with_layout(
-                                    egui::vec2(path_w, row_h),
-                                    egui::Layout::left_to_right(egui::Align::Center),
-                                    |ui| {
-                                        ui.set_min_width(path_w);
-                                        ui.add(egui::Link::new(b.path.display().to_string()))
-                                    },
+            // Column widths from the content: the longest name, and the longest path.
+            let font = egui::TextStyle::Body.resolve(ui.style());
+            let ctx2 = ui.ctx().clone();
+            let text_w = |s: &str| ctx2.fonts_mut(|f| f.layout_no_wrap(s.to_string(), font.clone(), egui::Color32::WHITE).size().x);
+            let name_w = bookmarks.iter().map(|b| text_w(&b.name)).fold(0.0, f32::max).clamp(140.0, 360.0) + 12.0;
+            let path_w = bookmarks.iter().map(|b| text_w(&b.path.display().to_string())).fold(0.0, f32::max).clamp(120.0, 900.0);
+            egui::ScrollArea::vertical().max_height(screen.height() * 0.6).auto_shrink([true, true]).show(ui, |ui| {
+                // Rows with explicit widths (a Grid would shrink the name fields).
+                let n = bookmarks.len();
+                let row_h = ui.spacing().interact_size.y;
+                for (i, b) in bookmarks.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.add_sized([18.0, row_h], egui::Label::new(if i < 9 { format!("{}", i + 1) } else { String::new() }));
+                        ui.add_sized([name_w, row_h], egui::TextEdit::singleline(&mut b.name).hint_text("name"));
+                        let link = ui
+                            .allocate_ui_with_layout(egui::vec2(path_w, row_h), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.set_width(path_w);
+                                let color = ui.visuals().hyperlink_color;
+                                ui.add(
+                                    egui::Label::new(RichText::new(b.path.display().to_string()).color(color))
+                                        .truncate()
+                                        .sense(egui::Sense::click()),
                                 )
-                                .inner;
-                            if link.clicked() || digit == Some(i + 1) {
-                                out = Outcome::GoTo(b.path.clone());
-                            }
-                            if ui.add_enabled(i > 0, egui::Button::new("⏶").small()).clicked() {
-                                swap = Some(i - 1);
-                            }
-                            if ui.add_enabled(i + 1 < n, egui::Button::new("⏷").small()).clicked() {
-                                swap = Some(i);
-                            }
-                            if ui.small_button("✖").on_hover_text("Remove").clicked() {
-                                remove = Some(i);
-                            }
-                        });
-                    }
-                    if bookmarks.is_empty() {
-                        ui.label("No bookmarks yet.");
-                    }
-                },
-            );
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            })
+                            .inner
+                            .on_hover_text(b.path.display().to_string());
+                        if link.clicked() || digit == Some(i + 1) {
+                            out = Outcome::GoTo(b.path.clone());
+                        }
+                        if ui.add_enabled(i > 0, egui::Button::new("⏶").small()).clicked() {
+                            swap = Some(i - 1);
+                        }
+                        if ui.add_enabled(i + 1 < n, egui::Button::new("⏷").small()).clicked() {
+                            swap = Some(i);
+                        }
+                        if ui.small_button("✖").on_hover_text("Remove").clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                }
+                if bookmarks.is_empty() {
+                    ui.label("No bookmarks yet.");
+                }
+            });
             if let Some(i) = swap {
                 bookmarks.swap(i, i + 1);
             }

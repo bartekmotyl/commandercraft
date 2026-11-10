@@ -233,7 +233,7 @@ fn viewer_quick_view_and_bookmarks() {
         let path = root.join(dir);
         h.state_mut().settings_mut().bookmarks.push(commandercraft_core::settings::Bookmark { name: name.into(), path });
     }
-    // Ctrl+D (Control, also on macOS) opens the bookmarks window.
+    // Ctrl+D (Control, also on macOS) opens the quick bookmarks list.
     key_mod(&mut h, Key::D, Modifiers::CTRL);
     assert!(h.state().has_dialog());
     snapshot(&mut h, "12-bookmarks");
@@ -373,4 +373,55 @@ fn ctrl_page_down_opens_any_archive_and_rows_paint_fully() {
     key_mod(&mut h, Key::PageDown, Modifiers::COMMAND);
     assert!(h.state().has_dialog());
     assert_eq!(cursor_name(&h), "a.txt");
+}
+
+#[test]
+fn quick_bookmarks_list_and_manager() {
+    use egui_kittest::kittest::Queryable;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fixture(root);
+    let mut h = harness(root);
+    for (name, dir) in [("Left side", "left"), ("Deep folder", "left/sub/deeper")] {
+        let path = root.join(dir);
+        h.state_mut().settings_mut().bookmarks.push(commandercraft_core::settings::Bookmark { name: name.into(), path });
+    }
+    h.run_steps(3);
+
+    // Ctrl+D, ↓, Enter: the second bookmark.
+    key_mod(&mut h, Key::D, Modifiers::COMMAND);
+    assert!(h.state().has_dialog());
+    snapshot(&mut h, "18-quick-bookmarks");
+    h.key_press(Key::ArrowDown);
+    h.run_steps(2);
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert!(!h.state().has_dialog());
+    assert_eq!(names(&h, 0), [".."], "went to left/sub/deeper");
+
+    // A digit picks directly.
+    key_mod(&mut h, Key::D, Modifiers::COMMAND);
+    h.key_press(Key::Num1);
+    h.run_steps(3);
+    assert!(names(&h, 0).contains(&"pack.zip".to_string()));
+
+    // ↑ from the first entry wraps to "Manage bookmarks…": Enter opens the manager.
+    key_mod(&mut h, Key::D, Modifiers::COMMAND);
+    h.key_press(Key::ArrowUp);
+    h.run_steps(2);
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert!(h.state().has_dialog());
+
+    // The manager keeps its size (it used to widen itself every frame).
+    h.run_steps(5);
+    let before = h.get_by_label("Close").rect();
+    h.run_steps(40);
+    let after = h.get_by_label("Close").rect();
+    assert_eq!(before, after, "the bookmarks manager changed size by itself");
+    assert!(after.right() < 1000.0, "the manager should not span the window");
+    snapshot(&mut h, "19-bookmarks-manager");
+    h.key_press(Key::Escape);
+    h.run_steps(3);
+    assert!(!h.state().has_dialog());
 }

@@ -167,6 +167,7 @@ impl CommanderApp {
                 palette,
                 show_hover: !self.keyboard_nav,
             };
+            self.panel_rects[side] = rect;
             actions[side] = panel::show(&mut child, &mut self.panels[side], &cx);
         }
         actions
@@ -235,6 +236,7 @@ impl CommanderApp {
                 }
             }
             Outcome::Confirm => self.confirm(d, ctx),
+            Outcome::Manage => self.open_dialog(Dialog::Bookmarks),
             Outcome::GoTo(path) => {
                 self.save_settings();
                 self.navigate(self.active, Location::Local(path), None);
@@ -308,7 +310,8 @@ impl CommanderApp {
         });
         ui.menu_button("Bookmarks", |ui| {
             item(ui, "Add current folder", String::new(), Cmd::AddBookmark, out);
-            item(ui, "Manage…", format!("{c}D"), Cmd::Bookmarks, out);
+            item(ui, "Show list", format!("{c}D"), Cmd::Bookmarks, out);
+            item(ui, "Manage…", String::new(), Cmd::ManageBookmarks, out);
             if !self.settings.bookmarks.is_empty() {
                 ui.separator();
             }

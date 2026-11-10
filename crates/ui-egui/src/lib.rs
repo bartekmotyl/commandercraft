@@ -14,7 +14,7 @@
 //! | Ctrl+← / Ctrl+→ | show the folder under the cursor (or the current one) in the left / right panel |
 //! | Ctrl+↑ / Ctrl+Shift+↑ | open the folder under the cursor in a new tab / in a new tab on the other side |
 //! | Ctrl+T, Ctrl+W, Ctrl+Tab, Ctrl+Shift+Tab | new tab, close tab, next / previous tab |
-//! | Ctrl+D | bookmarks |
+//! | Ctrl+D | bookmarks list (↑ ↓ Enter or 1–9; the last entry opens the manager) |
 //! | F3, Ctrl+Q (Control key), F4 | internal viewer, quick view, edit |
 //! | F5, F6, Shift+F6, F7 | copy, move, rename, new folder |
 //! | Alt+F9 / Ctrl+Shift+E | extract archives |
@@ -94,6 +94,8 @@ pub struct CommanderApp {
     cmdline_focus: bool,
     /// The cursor was last moved by keyboard: hide the mouse hover until the mouse moves.
     keyboard_nav: bool,
+    /// Where each panel was drawn (to anchor popups to the active one).
+    panel_rects: [egui::Rect; 2],
 }
 
 impl CommanderApp {
@@ -130,6 +132,7 @@ impl CommanderApp {
             cmdline: String::new(),
             cmdline_focus: false,
             keyboard_nav: false,
+            panel_rects: [egui::Rect::NOTHING; 2],
         }
     }
 

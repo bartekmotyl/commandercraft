@@ -53,7 +53,7 @@ every pull request, and builds the release packages for pushes to `main`.
 | Ctrl+← / Ctrl+→ | folder under cursor (or current) into the left / right panel |
 | Ctrl+↑ / Ctrl+Shift+↑ | folder under cursor in a new tab / new tab on the other side |
 | Ctrl+T, Ctrl+W, Ctrl+Tab | new, close, next tab (middle-click a folder: background tab) |
-| Ctrl+D | bookmarks |
+| Ctrl+D | bookmarks list (↑ ↓ Enter or 1–9; "Manage bookmarks…" at the end) |
 | F3 / Ctrl+Q (Control key) / F4 | viewer / quick view / edit |
 | F5 / F6 / Shift+F6 / F7 | copy / move / rename / new folder |
 | Alt+F9 or Ctrl+Shift+E | extract archives |
