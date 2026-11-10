@@ -86,6 +86,8 @@ pub struct CommanderApp {
     fonts: Option<FontLoader>,
     /// Scan system fonts (off in headless tests).
     load_system_fonts: bool,
+    /// Write settings to disk (off in tests, which must never touch the user's settings).
+    persist: bool,
     watcher: Option<DirWatcher>,
     last_auto_refresh: Instant,
     viewer: Option<Viewer>,
@@ -125,6 +127,7 @@ impl CommanderApp {
             style_dirty: true,
             fonts: None,
             load_system_fonts: true,
+            persist: true,
             watcher: None,
             last_auto_refresh: Instant::now(),
             viewer: None,
@@ -136,9 +139,16 @@ impl CommanderApp {
         }
     }
 
-    /// Without the system font scan and file watching (headless tests: deterministic, fast).
+    /// Without the system font scan, file watching and saving settings (headless tests:
+    /// deterministic, fast, and the user's settings file is never written).
     pub fn without_system_services(mut self) -> Self {
         self.load_system_fonts = false;
+        self.without_saving()
+    }
+
+    /// Never write the settings file (tests).
+    pub fn without_saving(mut self) -> Self {
+        self.persist = false;
         self
     }
 
@@ -251,6 +261,9 @@ impl CommanderApp {
 
     fn save_settings(&mut self) {
         self.store_session();
+        if !self.persist {
+            return;
+        }
         if let Err(e) = self.settings.save() {
             self.status = format!("Settings could not be saved: {e}");
         }

@@ -69,6 +69,8 @@ pub enum Outcome {
     GoTo(PathBuf),
     /// Quick bookmarks: open the manager.
     Manage,
+    /// Quick bookmarks: bookmark the current folder.
+    AddCurrent,
 }
 
 pub struct Env<'a> {
@@ -81,7 +83,7 @@ pub struct Env<'a> {
 pub fn show(ctx: &egui::Context, dialog: &mut Dialog, fresh: bool, env: Env<'_>) -> Outcome {
     match dialog {
         Dialog::Bookmarks => return bookmarks_window(ctx, env.bookmarks, env.current),
-        Dialog::QuickBookmarks { selected, anchor } => return quick_bookmarks(ctx, env.bookmarks, selected, *anchor),
+        Dialog::QuickBookmarks { selected, anchor } => return quick_bookmarks(ctx, env.bookmarks, env.current, selected, *anchor),
         _ => {}
     }
     let resp = egui::Modal::new(Id::new("cc_dialog")).show(ctx, |ui| {
@@ -178,10 +180,21 @@ fn buttons(ui: &mut egui::Ui, ok: &str, enter: bool) -> Outcome {
     out
 }
 
-/// The quick bookmarks list: ↑ ↓ and Enter, a click, or a digit picks; Esc or a click outside closes.
-fn quick_bookmarks(ctx: &egui::Context, bookmarks: &[Bookmark], selected: &mut usize, anchor: egui::Pos2) -> Outcome {
-    let manage = bookmarks.len(); // index of the last entry
-    let (up, down, enter, escape, digit) = ctx.input(|i| {
+/// The quick bookmarks list: the bookmarks, "Add current folder" and "Manage bookmarks…".
+/// ↑ ↓ and Enter, a click, a digit (bookmarks) or A (add) picks; Esc or a click outside closes.
+fn quick_bookmarks(
+    ctx: &egui::Context,
+    bookmarks: &[Bookmark],
+    current: Option<&Path>,
+    selected: &mut usize,
+    anchor: egui::Pos2,
+) -> Outcome {
+    let n = bookmarks.len();
+    // Entry indices: bookmarks 0..n, then "add" (only when the folder is not bookmarked yet), then "manage".
+    let (add, manage) = (n, n + 1);
+    let can_add = current.is_some_and(|dir| !bookmarks.iter().any(|b| b.path == dir));
+    let order: Vec<usize> = (0..n).chain(can_add.then_some(add)).chain([manage]).collect();
+    let (up, down, enter, escape, digit, add_key) = ctx.input(|i| {
         const DIGITS: [Key; 9] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
         (
             i.key_pressed(Key::ArrowUp),
@@ -189,67 +202,90 @@ fn quick_bookmarks(ctx: &egui::Context, bookmarks: &[Bookmark], selected: &mut u
             i.key_pressed(Key::Enter),
             i.key_pressed(Key::Escape),
             DIGITS.iter().position(|k| i.key_pressed(*k)),
+            i.key_pressed(Key::A),
         )
     });
+    let pos = order.iter().position(|i| i == selected).unwrap_or(0);
     if up {
-        *selected = selected.checked_sub(1).unwrap_or(manage);
+        *selected = order[(pos + order.len() - 1) % order.len()];
+    } else if down {
+        *selected = order[(pos + 1) % order.len()];
+    } else if !order.contains(selected) {
+        *selected = order[0];
     }
-    if down {
-        *selected = if *selected >= manage { 0 } else { *selected + 1 };
-    }
-    *selected = (*selected).min(manage);
-    let pick = |i: usize| if i == manage { Outcome::Manage } else { Outcome::GoTo(bookmarks[i].path.clone()) };
+    let pick = |i: usize| match i {
+        i if i < n => Outcome::GoTo(bookmarks[i].path.clone()),
+        i if i == add => Outcome::AddCurrent,
+        _ => Outcome::Manage,
+    };
     let mut out = Outcome::Open;
-    if let Some(d) = digit.filter(|d| *d < bookmarks.len()) {
+    if let Some(d) = digit.filter(|d| *d < n) {
         out = pick(d);
+    } else if add_key && can_add {
+        out = Outcome::AddCurrent;
     } else if enter {
         out = pick(*selected);
     } else if escape {
         out = Outcome::Cancel;
     }
 
+    let folder_name =
+        current.map(|dir| dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| dir.display().to_string()));
+    let add_label = match &folder_name {
+        Some(name) if can_add => format!("Add \"{name}\""),
+        Some(_) => "Current folder is bookmarked".to_string(),
+        None => String::new(),
+    };
+
     let area = egui::Area::new(Id::new("cc_quick_bookmarks")).order(egui::Order::Foreground).fixed_pos(anchor).show(ctx, |ui| {
         egui::Frame::menu(ui.style()).show(ui, |ui| {
             let labels: Vec<String> =
                 bookmarks.iter().map(|b| if b.name.trim().is_empty() { b.path.display().to_string() } else { b.name.clone() }).collect();
-            // As wide as the longest entry (plus its number), within limits.
+            // As wide as the longest entry (plus its key), within limits.
             let font = egui::TextStyle::Button.resolve(ui.style());
             let longest = labels
                 .iter()
                 .map(String::as_str)
-                .chain(["Manage bookmarks…"])
+                .chain(["Manage bookmarks…", add_label.as_str()])
                 .map(|s| ctx.fonts_mut(|f| f.layout_no_wrap(s.to_string(), font.clone(), egui::Color32::WHITE).size().x))
                 .fold(0.0, f32::max);
             let width = (longest + 48.0).clamp(180.0, 480.0);
             ui.set_width(width);
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-            let entry = |text: String, key: String, selected: bool| {
+            let entry = |text: String, key: &str, selected: bool| {
                 egui::Button::new(text)
                     .selected(selected)
                     .frame_when_inactive(selected)
                     .right_text(RichText::new(key).weak())
                     .min_size(egui::vec2(width, 0.0))
             };
-            for (i, (b, label)) in bookmarks.iter().zip(labels).enumerate() {
-                let key = if i < 9 { format!("{}", i + 1) } else { String::new() };
-                let r = ui.add(entry(label, key, i == *selected)).on_hover_text(b.path.display().to_string());
-                if r.hovered() && ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
-                    *selected = i;
+            let moved = ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
+            let sel = *selected;
+            let mut hovered_entry = None;
+            let mut row = |ui: &mut egui::Ui, button: egui::Button<'_>, index: usize, enabled: bool, hover: String| {
+                let r = ui.add_enabled(enabled, button);
+                let r = if hover.is_empty() { r } else { r.on_hover_text(hover) };
+                if r.hovered() && moved {
+                    hovered_entry = Some(index);
                 }
                 if r.clicked() {
-                    out = pick(i);
+                    out = pick(index);
                 }
+            };
+            for (i, (b, label)) in bookmarks.iter().zip(labels).enumerate() {
+                let key = if i < 9 { format!("{}", i + 1) } else { String::new() };
+                row(ui, entry(label, &key, i == sel), i, true, b.path.display().to_string());
             }
             if bookmarks.is_empty() {
                 ui.label(RichText::new("No bookmarks yet").weak());
             }
             ui.separator();
-            let r = ui.add(entry("Manage bookmarks…".into(), String::new(), *selected == manage));
-            if r.hovered() && ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
-                *selected = manage;
+            if let Some(dir) = current {
+                row(ui, entry(add_label.clone(), "A", sel == add), add, can_add, dir.display().to_string());
             }
-            if r.clicked() {
-                out = Outcome::Manage;
+            row(ui, entry("Manage bookmarks…".into(), "", sel == manage), manage, true, String::new());
+            if let Some(i) = hovered_entry {
+                *selected = i;
             }
         });
     });

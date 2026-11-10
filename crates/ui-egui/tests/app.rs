@@ -333,7 +333,7 @@ fn cjk_file_names_render_with_system_fonts() {
     let settings = Settings { left: tab(&root.join("left")), right: tab(&root.join("right")), ..Default::default() };
     let mut h = Harness::builder()
         .with_size(vec2(1100.0, 600.0))
-        .build_ui_state(|ui, app: &mut CommanderApp| app.show(ui), CommanderApp::new(settings));
+        .build_ui_state(|ui, app: &mut CommanderApp| app.show(ui), CommanderApp::new(settings).without_saving());
     // The font scan runs in the background.
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(8) {
@@ -424,4 +424,43 @@ fn quick_bookmarks_list_and_manager() {
     h.key_press(Key::Escape);
     h.run_steps(3);
     assert!(!h.state().has_dialog());
+}
+
+#[test]
+fn quick_bookmarks_adds_the_current_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fixture(root);
+    let mut h = harness(root);
+    h.run_steps(3);
+    let left = root.join("left");
+
+    // Ctrl+D, A: the current folder is bookmarked.
+    key_mod(&mut h, Key::D, Modifiers::COMMAND);
+    snapshot(&mut h, "20-quick-bookmarks-add");
+    h.key_press(Key::A);
+    h.run_steps(3);
+    assert!(!h.state().has_dialog());
+    assert_eq!(h.state().settings().bookmarks.iter().map(|b| b.path.clone()).collect::<Vec<_>>(), std::slice::from_ref(&left));
+    assert_eq!(h.state().settings().bookmarks[0].name, "left");
+
+    // Again: already bookmarked, so A does nothing and the entry is disabled.
+    key_mod(&mut h, Key::D, Modifiers::COMMAND);
+    snapshot(&mut h, "21-quick-bookmarks-already");
+    h.key_press(Key::A);
+    h.run_steps(3);
+    assert_eq!(h.state().settings().bookmarks.len(), 1);
+    h.key_press(Key::Escape);
+    h.run_steps(3);
+
+    // In another folder: ↓ moves from the bookmark to "Add", Enter adds.
+    select(&mut h, "sub");
+    key(&mut h, Key::Enter);
+    key_mod(&mut h, Key::D, Modifiers::COMMAND);
+    h.key_press(Key::ArrowDown);
+    h.run_steps(2);
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert_eq!(h.state().settings().bookmarks.len(), 2);
+    assert_eq!(h.state().settings().bookmarks[1].path, left.join("sub"));
 }

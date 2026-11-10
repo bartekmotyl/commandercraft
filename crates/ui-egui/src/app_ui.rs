@@ -237,6 +237,7 @@ impl CommanderApp {
             }
             Outcome::Confirm => self.confirm(d, ctx),
             Outcome::Manage => self.open_dialog(Dialog::Bookmarks),
+            Outcome::AddCurrent => self.run(Cmd::AddBookmark, ctx),
             Outcome::GoTo(path) => {
                 self.save_settings();
                 self.navigate(self.active, Location::Local(path), None);
